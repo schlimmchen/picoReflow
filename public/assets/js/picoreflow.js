@@ -551,7 +551,7 @@ $(document).ready(function()
                     $('#state').html('<p class="ds-text">'+state+'</p>');
                 }
 
-                $('#act_temp').html(parseInt(x.temperature));
+                $('#act_temp').html(Number.parseFloat(x.temperature).toFixed(1));
                 
                 if (x.heat > 0.5) { $('#heat').addClass("ds-led-heat-active"); } else { $('#heat').removeClass("ds-led-heat-active"); }
                 if (x.cool > 0.5) { $('#cool').addClass("ds-led-cool-active"); } else { $('#cool').removeClass("ds-led-cool-active"); }

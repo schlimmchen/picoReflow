@@ -26,11 +26,13 @@ currency_type   = "EUR"   # Currency Symbol to show when calculating cost to run
 #   can use whichever GPIO you prefer/have available.
 
 ### Outputs
-gpio_heat = 11  # Switches zero-cross solid-state-relay
+gpio_heat_primary = 11  # Switches relay controling primary heater
+gpio_heat_secondary = 9  # Switches relay controling secondary heater
 gpio_cool = 10  # Regulates PWM for 12V DC Blower
 gpio_air  = 9   # Switches 0-phase det. solid-state-relay
 
 heater_invert = 0 # switches the polarity of the heater control
+cooler_invert = 0 # switches the polarity of the cooler control
 
 ### Inputs
 gpio_door = 18
@@ -52,16 +54,25 @@ gpio_sensor_data = 17
 spi_sensor_chip_id = 0
 
 ### amount of time, in seconds, to wait between reads of the thermocouple
-sensor_time_wait = .5
+### higher values limit the frequency of relays being switched
+sensor_time_wait = 1
 
 
 ########################################################################
 #
 #   PID parameters
 
-pid_ki = 0.1  # Integration
-pid_kd = 0.4  # Derivative
-pid_kp = 0.5  # Proportional
+# stock: p=0.5, i=0.1, d=0.4
+pid_kp = 0.10  # Proportional
+pid_ki = 0.20  # Integration
+pid_kd = 2.00  # Derivative
+
+# we cannot keep heating for little (negative) deviations from the setpoint
+# since the heating elements are very inert and the overshoot would be too
+# high. the integration part of the PID will enable heat if we keep away from
+# the setpoint for longer.
+primary_heating_threshold = 1.0
+secondary_heating_threshold = 1.0
 
 
 ########################################################################
@@ -82,7 +93,7 @@ sim_R_ho_air   = 0.05   # K/W  " with internal air circulation
 #
 #   Time and Temperature parameters
 
-temp_scale          = "c" # c = Celsius | f = Fahrenheit - Unit to display 
+temp_scale          = "c" # c = Celsius | f = Fahrenheit - Unit to display
 time_scale_slope    = "s" # s = Seconds | m = Minutes | h = Hours - Slope displayed in temp_scale per time_scale_slope
 time_scale_profile  = "s" # s = Seconds | m = Minutes | h = Hours - Enter and view target time in time_scale_profile
 

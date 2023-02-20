@@ -27,8 +27,10 @@ try:
             raise Exception("gpio_cool pin %s collides with SPI pins %s" % (config.gpio_cool, spi_reserved_gpio))
         if config.gpio_door in spi_reserved_gpio:
             raise Exception("gpio_door pin %s collides with SPI pins %s" % (config.gpio_door, spi_reserved_gpio))
-        if config.gpio_heat in spi_reserved_gpio:
-            raise Exception("gpio_heat pin %s collides with SPI pins %s" % (config.gpio_heat, spi_reserved_gpio))
+        if config.gpio_heat_primary in spi_reserved_gpio:
+            raise Exception("gpio_heat_primary pin %s collides with SPI pins %s" % (config.gpio_heat_primary, spi_reserved_gpio))
+        if config.gpio_heat_secondary in spi_reserved_gpio:
+            raise Exception("gpio_heat_secondary pin %s collides with SPI pins %s" % (config.gpio_heat_secondary, spi_reserved_gpio))
     if config.max6675:
         from max6675 import MAX6675, MAX6675Error
         log.info("import MAX6675")
@@ -41,7 +43,8 @@ try:
     import RPi.GPIO as GPIO
     GPIO.setmode(GPIO.BCM)
     GPIO.setwarnings(False)
-    GPIO.setup(config.gpio_heat, GPIO.OUT)
+    GPIO.setup(config.gpio_heat_primary, GPIO.OUT)
+    GPIO.setup(config.gpio_heat_secondary, GPIO.OUT)
     GPIO.setup(config.gpio_cool, GPIO.OUT)
     GPIO.setup(config.gpio_air, GPIO.OUT)
     GPIO.setup(config.gpio_door, GPIO.IN, pull_up_down=GPIO.PUD_UP)
@@ -82,7 +85,7 @@ class Oven (threading.Thread):
         self.target = 0
         self.door = self.get_door_state()
         self.state = Oven.STATE_IDLE
-        self.set_heat(False)
+        self.set_heat(0)
         self.set_cool(False)
         self.set_air(False)
         self.pid = PID(ki=config.pid_ki, kd=config.pid_kd, kp=config.pid_kp)
@@ -99,8 +102,8 @@ class Oven (threading.Thread):
         self.reset()
 
     def run(self):
-        temperature_count = 0
-        last_temp = 0
+        last_temp_time = datetime.datetime.now()
+        last_temp_value = 0
         pid = 0
         while True:
             self.door = self.get_door_state()
@@ -111,34 +114,37 @@ class Oven (threading.Thread):
                 else:
                     runtime_delta = datetime.datetime.now() - self.start_time
                     self.runtime = runtime_delta.total_seconds()
-                log.info("running at %.1f deg C (Target: %.1f) , heat %.2f, cool %.2f, air %.2f, door %s (%.1fs/%.0f)" % (self.temp_sensor.temperature, self.target, self.heat, self.cool, self.air, self.door, self.runtime, self.totaltime))
                 self.target = self.profile.get_target_temperature(self.runtime)
-                pid = self.pid.compute(self.target, self.temp_sensor.temperature)
 
-                log.info("pid: %.3f" % pid)
+                # since our system is very inert, we actually chase future setpoints
+                forecast_time = min(self.profile.get_duration(), self.runtime + 10)
+                forecast_temp = self.profile.get_target_temperature(forecast_time)
+                pid, details = self.pid.compute(forecast_temp, self.temp_sensor.temperature)
+
+                print(f"\rrunning at {self.temp_sensor.temperature:5.1f}°C "\
+                        f"target {self.target:3.0f}°C, {details:s}, heat {self.heat:3.1f}, "\
+                        f"cool {self.cool:3.1f}, air {self.air:3.1f}, "\
+                        f"door {self.door:>6s}, {self.runtime:5.1f}s/{self.totaltime:3.0f}s", end='')
 
                 self.set_cool(pid <= -1)
-                if(pid > 0):
-                    # The temp should be changing with the heat on
-                    # Count the number of time_steps encountered with no change and the heat on
-                    if last_temp == self.temp_sensor.temperature:
-                        temperature_count += 1
-                    else:
-                        temperature_count = 0
-                    # If the heat is on and nothing is changing, reset
-                    # The direction or amount of change does not matter
-                    # This prevents runaway in the event of a sensor read failure                   
-                    if temperature_count > 20:
-                        log.info("Error reading sensor, oven temp not responding to heat.")
-                        self.reset()
-                else:
-                    temperature_count = 0
-                    
-                #Capture the last temperature value.  This must be done before set_heat, since there is a sleep in there now.
-                last_temp = self.temp_sensor.temperature
-                
                 self.set_heat(pid)
-                
+
+                if(self.heat):
+                    # The temp should be changing with the heat on
+                    # The direction or amount of change does not matter
+                    # This prevents runaway in the event of a sensor read failure
+                    if abs(last_temp_value - self.temp_sensor.temperature) > 0.5:
+                        last_temp_value = self.temp_sensor.temperature
+                        last_temp_time = datetime.datetime.now()
+                    else:
+                        # If the heat is on and nothing is changing, reset
+                        temp_time_delta = datetime.datetime.now() - last_temp_time
+                        if temp_time_delta.total_seconds() > 20:
+                            log.error("Error reading sensor, oven temp not responding to heat.")
+                            self.reset()
+                else:
+                    last_temp_time = datetime.datetime.now()
+
                 #if self.profile.is_rising(self.runtime):
                 #    self.set_cool(False)
                 #    self.set_heat(self.temp_sensor.temperature < self.target)
@@ -154,41 +160,31 @@ class Oven (threading.Thread):
                 if self.runtime >= self.totaltime:
                     self.reset()
 
-            
-            if pid > 0:
-                time.sleep(self.time_step * (1 - pid))
-            else:
-                time.sleep(self.time_step)
+
+            # TODO decrease sleep when nearing the setpoint?
+            #if pid > 0:
+            #    time.sleep(self.time_step * (2 - pid))
+            #else:
+            time.sleep(self.time_step)
 
     def set_heat(self, value):
-        if value > 0:
-            self.heat = 1.0
-            if gpio_available:
-               if config.heater_invert:
-                 GPIO.output(config.gpio_heat, GPIO.LOW)
-                 time.sleep(self.time_step * value)
-                 GPIO.output(config.gpio_heat, GPIO.HIGH)   
-               else:
-                 GPIO.output(config.gpio_heat, GPIO.HIGH)
-                 time.sleep(self.time_step * value)
-                 GPIO.output(config.gpio_heat, GPIO.LOW)   
-        else:
-            self.heat = 0.0
-            if gpio_available:
-               if config.heater_invert:
-                 GPIO.output(config.gpio_heat, GPIO.HIGH)
-               else:
-                 GPIO.output(config.gpio_heat, GPIO.LOW)
+        self.heat = 1.0 if value > config.primary_heating_threshold else 0.0
+
+        heat_primary = True if value > config.primary_heating_threshold else False
+        heat_secondary = True if value > config.secondary_heating_threshold else False
+
+        GPIO.output(config.gpio_heat_primary, heat_primary ^ config.heater_invert)
+        GPIO.output(config.gpio_heat_secondary, heat_secondary ^ config.heater_invert)
 
     def set_cool(self, value):
         if value:
             self.cool = 1.0
             if gpio_available:
-                GPIO.output(config.gpio_cool, GPIO.LOW)
+                GPIO.output(config.gpio_cool, GPIO.HIGH if config.cooler_invert else GPIO.LOW)
         else:
             self.cool = 0.0
             if gpio_available:
-                GPIO.output(config.gpio_cool, GPIO.HIGH)
+                GPIO.output(config.gpio_cool, GPIO.LOW if config.cooler_invert else GPIO.HIGH)
 
     def set_air(self, value):
         if value:
@@ -327,7 +323,7 @@ class Profile():
         next_point = None
 
         for i in range(len(self.data)):
-            if time < self.data[i][0]:
+            if time <= self.data[i][0]:
                 prev_point = self.data[i-1]
                 next_point = self.data[i]
                 break
@@ -351,7 +347,6 @@ class Profile():
         temp = prev_point[1] + (time - prev_point[0]) * incl
         return temp
 
-
 class PID():
     def __init__(self, ki=1, kp=1, kd=1):
         self.ki = ki
@@ -371,8 +366,8 @@ class PID():
         dErr = (error - self.lastErr) / timeDelta
 
         output = self.kp * error + self.iterm + self.kd * dErr
-        output = sorted([-1, output, 1])[1]
+        details = f"kp*error={self.kp*error:6.2f}, iterm={self.iterm:5.2f}, kd*dErr={self.kd*dErr:6.2f}, output={output:6.2f}"
         self.lastErr = error
         self.lastNow = now
 
-        return output
+        return output, details
